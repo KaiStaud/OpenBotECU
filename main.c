@@ -22,12 +22,22 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+#define LED1 1
+#define LED2 2
+#define LED4 4
 
+#ifdef __GNUC__
+  /* With GCC, small printf (option LD Linker->Libraries->Small printf
+     set to 'Yes') calls __io_putchar() */
+  #define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
+#else
+  #define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
+#endif /* __GNUC__ */
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -42,24 +52,32 @@
 /* Private variables ---------------------------------------------------------*/
 FDCAN_HandleTypeDef hfdcan1;
 
-UART_HandleTypeDef hlpuart1;
+UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-FDCAN_TxHeaderTypeDef   TxHeader;
-FDCAN_RxHeaderTypeDef   RxHeader;
-HAL_FDCAN_StateTypeDef myCanState;
-HAL_StatusTypeDef myState;
-uint8_t myTxData[8]={1,2,3,4,5,6,7,8,9};
-uint8_t RxData[8];
+FDCAN_FilterTypeDef sFilterConfig;
+FDCAN_TxHeaderTypeDef TxHeader;
+FDCAN_RxHeaderTypeDef RxHeader;
+uint8_t TxData[] = {0x10, 0x32, 0x54, 0x76, 0x98, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00};
+uint8_t RxData[16];
+volatile uint32_t Instance = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_LPUART1_UART_Init(void);
 static void MX_FDCAN1_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+static uint32_t BufferCmp8b(uint8_t* pBuffer1, uint8_t* pBuffer2, uint16_t BufferLength);
+void BSP_LED_On(int a)
+{
+	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+}
+void BSP_LED_Off(int a)
+{
+	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -95,28 +113,74 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_LPUART1_UART_Init();
   MX_FDCAN1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  /* Configure reception filter to Rx FIFO 0 on both FDCAN instances */
+    sFilterConfig.IdType = FDCAN_STANDARD_ID;
+    sFilterConfig.FilterIndex = 0;
+    sFilterConfig.FilterType = FDCAN_FILTER_MASK;
+    sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+    sFilterConfig.FilterID1 = 0x111;
+    sFilterConfig.FilterID2 = 0x7FF;
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
+    {
+      Error_Handler();
+    }
 
+    /* Configure global filter on both FDCAN instances:
+       Filter all remote frames with STD and EXT ID
+       Reject non matching frames with STD ID and EXT ID */
+    if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT, FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    /* Activate Rx FIFO 0 new message notification on both FDCAN instances */
+    if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
+    {
+      Error_Handler();
+    }
+    /* Prepare Tx message Header */
+    TxHeader.Identifier = 0x111;
+    TxHeader.IdType = FDCAN_STANDARD_ID;
+    TxHeader.TxFrameType = FDCAN_DATA_FRAME;
+    TxHeader.DataLength = FDCAN_DLC_BYTES_16;
+    TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    TxHeader.BitRateSwitch = FDCAN_BRS_ON;
+    TxHeader.FDFormat = FDCAN_FD_CAN;
+    TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+    TxHeader.MessageMarker = 0;
+
+    /* Configure and enable Tx Delay Compensation, required for BRS mode.
+       TdcOffset default recommended value: DataTimeSeg1 * DataPrescaler
+       TdcFilter default recommended value: 0 */
+    if (HAL_FDCAN_ConfigTxDelayCompensation(&hfdcan1, 5, 0) != HAL_OK)
+    {
+      Error_Handler();
+    }
+    if (HAL_FDCAN_EnableTxDelayCompensation(&hfdcan1) != HAL_OK)
+    {
+      Error_Handler();
+    }
+    /* Start the FDCAN module on both FDCAN instances */
+    if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+    {
+      Error_Handler();
+    }
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+    HAL_StatusTypeDef err;
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  myTxData[0]++;
-	  myCanState = HAL_FDCAN_GetState(&hfdcan1);
-	  HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-	  HAL_Delay(1);
-	  myState = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &TxHeader, myTxData);
-	   if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK)
-	    {
-		   HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-	    }
+	  HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+     err = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &TxHeader, TxData);
+       HAL_Delay(500);
   }
   /* USER CODE END 3 */
 }
@@ -133,7 +197,7 @@ void SystemClock_Config(void)
 
   /** Configure the main internal regulator output voltage
   */
-  HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
+  HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1);
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
@@ -142,8 +206,8 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
-  RCC_OscInitStruct.PLL.PLLN = 85;
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV1;
+  RCC_OscInitStruct.PLL.PLLN = 8;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
@@ -160,14 +224,14 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
   {
     Error_Handler();
   }
   /** Initializes the peripherals clocks
   */
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_LPUART1|RCC_PERIPHCLK_FDCAN;
-  PeriphClkInit.Lpuart1ClockSelection = RCC_LPUART1CLKSOURCE_PCLK1;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART2|RCC_PERIPHCLK_FDCAN;
+  PeriphClkInit.Usart2ClockSelection = RCC_USART2CLKSOURCE_PCLK1;
   PeriphClkInit.FdcanClockSelection = RCC_FDCANCLKSOURCE_PCLK1;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
@@ -213,93 +277,56 @@ static void MX_FDCAN1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN FDCAN1_Init 2 */
-	FDCAN_FilterTypeDef sFilterConfig;
-
-	sFilterConfig.IdType = FDCAN_STANDARD_ID;
-	sFilterConfig.FilterIndex = 0;
-	sFilterConfig.FilterType = FDCAN_FILTER_MASK;
-	sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-	sFilterConfig.FilterID1 = 0x321;
-	sFilterConfig.FilterID2 = 0x7FF;
-
-	if(HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
-	{
-		Error_Handler();
-	}
-
-	if(HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT, FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE) != HAL_OK)
-	{
-		Error_Handler();
-	}
-
-	if(HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
-	{
-		Error_Handler();
-	}
-
-	if(HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
-	{
-		Error_Handler();
-	}
-
-	TxHeader.Identifier = 0x123;
-	TxHeader.IdType = FDCAN_STANDARD_ID;
-	TxHeader.TxFrameType = FDCAN_DATA_FRAME;
-	TxHeader.DataLength = FDCAN_DLC_BYTES_8;
-	TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-	TxHeader.BitRateSwitch = FDCAN_BRS_OFF;
-	TxHeader.FDFormat = FDCAN_CLASSIC_CAN;
-	TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-	TxHeader.MessageMarker = 0;
 
   /* USER CODE END FDCAN1_Init 2 */
 
 }
 
 /**
-  * @brief LPUART1 Initialization Function
+  * @brief USART2 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_LPUART1_UART_Init(void)
+static void MX_USART2_UART_Init(void)
 {
 
-  /* USER CODE BEGIN LPUART1_Init 0 */
+  /* USER CODE BEGIN USART2_Init 0 */
 
-  /* USER CODE END LPUART1_Init 0 */
+  /* USER CODE END USART2_Init 0 */
 
-  /* USER CODE BEGIN LPUART1_Init 1 */
+  /* USER CODE BEGIN USART2_Init 1 */
 
-  /* USER CODE END LPUART1_Init 1 */
-  hlpuart1.Instance = LPUART1;
-  hlpuart1.Init.BaudRate = 115200;
-  hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
-  hlpuart1.Init.StopBits = UART_STOPBITS_1;
-  hlpuart1.Init.Parity = UART_PARITY_NONE;
-  hlpuart1.Init.Mode = UART_MODE_TX_RX;
-  hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  hlpuart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&hlpuart1) != HAL_OK)
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetTxFifoThreshold(&hlpuart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetRxFifoThreshold(&hlpuart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_UARTEx_DisableFifoMode(&hlpuart1) != HAL_OK)
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN LPUART1_Init 2 */
+  /* USER CODE BEGIN USART2_Init 2 */
 
-  /* USER CODE END LPUART1_Init 2 */
+  /* USER CODE END USART2_Init 2 */
 
 }
 
@@ -321,11 +348,22 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LPUART1_RX_Pin */
+  GPIO_InitStruct.Pin = LPUART1_RX_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF12_LPUART1;
+  HAL_GPIO_Init(LPUART1_RX_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LD2_Pin */
   GPIO_InitStruct.Pin = LD2_Pin;
@@ -334,6 +372,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : LD3_Pin */
+  GPIO_InitStruct.Pin = LD3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LD3_GPIO_Port, &GPIO_InitStruct);
+
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
@@ -341,33 +386,87 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
 /**
   * @brief  Rx FIFO 0 callback.
-  * @param  hfdcan: pointer to an FDCAN_HandleTypeDef structure that contains
+  * @param  hfdcan pointer to an FDCAN_HandleTypeDef structure that contains
   *         the configuration information for the specified FDCAN.
-  * @param  RxFifo0ITs: indicates which Rx FIFO 0 interrupts are signalled.
+  * @param  RxFifo0ITs indicates which Rx FIFO 0 interrupts are signaled.
   *         This parameter can be any combination of @arg FDCAN_Rx_Fifo0_Interrupts.
   * @retval None
   */
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
-  if((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET)
+  if((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0)
   {
+		HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+
     /* Retrieve Rx messages from RX FIFO0 */
     if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &RxHeader, RxData) != HAL_OK)
     {
-    Error_Handler();
+      Error_Handler();
     }
-
-    /* Display LEDx */
-    if ((RxHeader.Identifier == 0x321) && (RxHeader.IdType == FDCAN_STANDARD_ID) && (RxHeader.DataLength == FDCAN_DLC_BYTES_2))
+    for(int i=0;i<16;i++)
     {
-      //LED_Display(RxData[0]);
-      //ubKeyNumber = RxData[0];
+    	printf("%04x ",RxData[i]);
+    }
+    printf("\r\n");
+    /* Compare payload to expected data */
+    if (BufferCmp8b(TxData, RxData, 16) != 0)
+    {
+      Error_Handler();
+    }
+    else
+    {
+      if (hfdcan->Instance == FDCAN1)
+      {
+        /* Turn LED1 on */
+   //     BSP_LED_On(LED1);
+      }
+      else /* FDCAN2 */
+      {
+        /* Turn LED4 on */
+     //   BSP_LED_On(LED4);
+      }
     }
   }
 }
+
+/**
+  * @brief Compares two buffers.
+  * @par Input
+  *  - pBuffer1, pBuffer2: buffers to be compared.
+  *  - BufferLength: buffer's length
+  * @par Output
+  * None.
+  * @retval
+  *   0: pBuffer1 identical to pBuffer2
+  *   1: pBuffer1 differs from pBuffer2
+  */
+static uint32_t BufferCmp8b(uint8_t* pBuffer1, uint8_t* pBuffer2, uint16_t BufferLength)
+{
+  while(BufferLength--)
+  {
+    if(*pBuffer1 != *pBuffer2)
+    {
+      return 1;
+    }
+
+    pBuffer1++;
+    pBuffer2++;
+  }
+  return 0;
+}
+
+PUTCHAR_PROTOTYPE
+{
+  /* Place your implementation of fputc here */
+  /* e.g. write a character to the EVAL_COM1 and Loop until the end of transmission */
+  HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, 0xFFFF);
+
+  return ch;
+}
+
+
 /* USER CODE END 4 */
 
 /**
